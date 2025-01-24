@@ -308,6 +308,9 @@ func main() {
 	// Try substitute on remote host before building locally (to avoid downloaded things that will be substituted from cache
 	// Wrap exec.Command to unify logging the command and to give each command a unique ID that can be used to reconstruct what is being logged
 	// Find a way to log commands where host is the machine executing morph
+	// Detect when a process wants STDIN-input and find a way to handle that - mostly relevant for SSH TOFU prompts
+	// Tyvstjæl hvordan K8s deployments virker med min og max men brug det på tags. Når dette aktiveres skal morph først health checke alt så morph ved hvor meget der er oppe og nede
+	// Replace tags with labels
 
 	// Metrics that can be reacted on
 
@@ -401,7 +404,7 @@ func main() {
 		// setup hosts
 		// FIXME: Should this be its own step instead?
 		// But then what about the generated plan? It can no longer contain the lists of hosts, but only the deployment and filters users, which will make resume difficult..
-		hosts, err := cruft.GetHosts(mctx, deployment)
+		deploymentMetadata, hosts, err := cruft.GetHosts(mctx, deployment)
 		common.HandleError(err)
 
 		for _, host := range hosts {
@@ -455,6 +458,7 @@ func main() {
 			Steps:        &stepsDb,
 			UIActive:     !*jsonOutput,
 			UI:           tui,
+			Constraints:  deploymentMetadata.Constraints,
 		}
 
 		go planner.StepMonitor(&stepsDb, &stepsDone)
@@ -516,6 +520,7 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 		hostSpecificPlan.Action = actions.None{}
 		hostSpecificPlan.Parallel = false
 		hostSpecificPlan.DependsOn = []string{buildPlan.Id}
+		hostSpecificPlan.Labels = host.Labels
 
 		hostSpecificPlans[host.Name] = hostSpecificPlan
 	}

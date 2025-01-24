@@ -103,26 +103,26 @@ func execListSecretsAsJson(mctx *common.MorphContext, hosts []nix.Host) error {
 	return nil
 }
 
-func GetHosts(mctx *common.MorphContext, deploymentPath string) (hosts []nix.Host, err error) {
+func GetHosts(mctx *common.MorphContext, deploymentPath string) (deploymentMetadata nix.DeploymentMetadata, hosts []nix.Host, err error) {
 
 	deploymentFile, err := os.Open(deploymentPath)
 	if err != nil {
-		return hosts, err
+		return deploymentMetadata, hosts, err
 	}
 
 	deploymentAbsPath, err := filepath.Abs(deploymentFile.Name())
 	if err != nil {
-		return hosts, err
+		return deploymentMetadata, hosts, err
 	}
 
 	deployment, err := mctx.NixContext.GetMachines(deploymentAbsPath)
 	if err != nil {
-		return hosts, err
+		return deploymentMetadata, hosts, err
 	}
 
 	matchingHosts, err := filter.MatchHosts(deployment.Hosts, mctx.SelectGlob)
 	if err != nil {
-		return hosts, err
+		return deploymentMetadata, hosts, err
 	}
 
 	var selectedTags []string
@@ -162,7 +162,7 @@ func GetHosts(mctx *common.MorphContext, deploymentPath string) (hosts []nix.Hos
 		Dict("hosts", zLogHostsDict).
 		Msg("read deployment")
 
-	return filteredHosts, nil
+	return deployment.Meta, filteredHosts, nil
 }
 
 func buildHosts(mctx *common.MorphContext, hosts []nix.Host) (resultPath string, err error) {

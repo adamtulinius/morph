@@ -113,7 +113,7 @@ rec {
         in {
           inherit (v.config.deployment)
             targetHost targetPort targetUser secrets preDeployChecks healthChecks buildOnly
-            substituteOnDestination tags;
+            substituteOnDestination tags labels;
           name = n;
           nixosRelease = v.config.system.nixos.release or (removeSuffix
             v.config.system.nixos.version.suffix
@@ -134,6 +134,7 @@ rec {
         meta = {
           description = network.description or "";
           ordering = network.ordering or { };
+          constraints = network.constraints or [ ];
         };
       };
 

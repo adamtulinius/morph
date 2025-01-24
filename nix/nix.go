@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/DBCDK/morph/cache"
 	"github.com/DBCDK/morph/logging"
 	"github.com/rs/zerolog/log"
 	"io/ioutil"
@@ -13,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +22,10 @@ import (
 	"github.com/DBCDK/morph/secrets"
 	"github.com/DBCDK/morph/ssh"
 	"github.com/DBCDK/morph/utils"
+)
+
+var (
+	constraintChannelCounter atomic.Int32
 )
 
 type Host struct {
@@ -35,15 +41,58 @@ type Host struct {
 	SubstituteOnDestination bool
 	NixConfig               map[string]string
 	Tags                    []string
+	Labels                  map[string]string
 }
 
 type HostOrdering struct {
 	Tags []string
 }
 
+type Constraint struct {
+	Selector       LabelSelector               `json:"selector"`
+	MaxUnavailable int                         `json:"maxUnavailable"`
+	Chans          *cache.LockedMap[chan bool] `json:"-"`
+}
+
+// Set default values for a Constraint when being unmarshalled
+func (c *Constraint) UnmarshalJSON(data []byte) error {
+	id := constraintChannelCounter.Add(1)
+	chans := cache.NewLockedMap[chan bool](fmt.Sprintf("hest-%d", id))
+	c.Chans = &chans
+
+	type ConstraintAlias Constraint
+	return json.Unmarshal(data, (*ConstraintAlias)(c))
+}
+
+type LabelSelector struct {
+	Label string
+	Value string
+}
+
+func (ls LabelSelector) Match(label string, value string) bool {
+	return ls.Label == label && (ls.Value == "*" || value == "*" || ls.Value == value)
+}
+
+func (c Constraint) GetChan(label string, value string) (chan bool, error) {
+	if c.Selector.Match(label, value) {
+		key := label + "=" + value
+
+		if c.MaxUnavailable == 0 {
+			log.Panic().Msg("Constraint::MaxUnavailable==0: This will cause morph to deadlock, refusing to continue")
+		}
+
+		log.Info().Msg(fmt.Sprintf("constraint: '%s'='%s': concurrency: %d", label, value, c.MaxUnavailable))
+
+		return c.Chans.GetOrSet(key, make(chan bool, c.MaxUnavailable)), nil
+	} else {
+		return nil, errors.New("selector doesn't match")
+	}
+}
+
 type DeploymentMetadata struct {
 	Description string
 	Ordering    HostOrdering
+	Constraints []Constraint
 }
 
 type Deployment struct {
@@ -275,7 +324,7 @@ func (ctx *NixContext) GetBuildShell(deploymentPath string) (buildShell *string,
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = logging.CmdWriter{Host: ""}
 
 	utils.AddFinalizer(func() {
 		if (cmd.ProcessState == nil || !cmd.ProcessState.Exited()) && cmd.Process != nil {

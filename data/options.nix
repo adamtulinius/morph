@@ -261,6 +261,13 @@ in
         Host tags.
       '';
     };
+    labels = mkOption {
+      type = attrsOf str;
+      default = { };
+      description = ''
+        Host labels.
+      '';
+    };
   };
 
   # Creates a txt-file that lists all system healthcheck commands

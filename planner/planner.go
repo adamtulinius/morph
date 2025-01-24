@@ -37,7 +37,7 @@ type MegaContext struct { // FIXME: Lol get rid of this
 	Steps        *cache.LockedMap[Step]
 	UIActive     bool
 	UI           *tea.Program
-	//State tilføj steps and bla bla, stat
+	Constraints  []nix.Constraint
 }
 
 type ExecutionState struct {
@@ -91,6 +91,7 @@ func ExecuteStep(ctx context.Context, megaCtx MegaContext, step Step) error {
 
 	megaCtx.UpdateStepStatus(step.Id, Scheduled)
 	waitForDependencies(megaCtx, step.Id, "dependencies", step.DependsOn)
+	slot := waitForSlot(megaCtx, step)
 	megaCtx.UpdateStepStatus(step.Id, Running)
 
 	err := step.Action.Run(ctx, megaCtx.MorphContext, megaCtx.Hosts, megaCtx.Cache)
@@ -156,7 +157,35 @@ func ExecuteStep(ctx context.Context, megaCtx MegaContext, step Step) error {
 
 	megaCtx.UpdateStepStatus(step.Id, Done)
 
+	slot.Free()
+
 	return nil
+}
+
+// FIXME: Make constraints configurable runtime --maxUnavailable location=*:3
+func waitForSlot(megaContext MegaContext, step Step) Slot {
+	// Der er noget med tags og bla bla, steps har fx ikke tags eller labels lige nu, og
+	// dette skal eksplicit ikke være på host-niveau men på step-niveauz
+
+	// Idé: maxUnavailable = 1 for alle steps by default, jo mindre steppet er markeret som concurrent (e.g. health checks)
+	// Drop forskellen på parallel true/false i ExecuteStep. Alt er nu parallel by default, men med maxUnavailable = 1 (så samme resultat, men nu muligt at override)
+	// Host tags skal propageres til steps så e.g. location info kan komme med
+
+	slot := newSlot()
+
+	for _, constraint := range megaContext.Constraints {
+		for label, value := range step.Labels {
+			if c, err := constraint.GetChan(label, value); err != nil {
+				// no match, ignore
+				continue
+			} else {
+				c <- true
+				slot.AddChannel(c)
+			}
+		}
+	}
+
+	return slot
 }
 
 func waitForDependencies(megaContext MegaContext, id string, hint string, dependencies []string) {

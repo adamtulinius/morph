@@ -1,12 +1,10 @@
 package common
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/DBCDK/morph/nix"
 	"github.com/DBCDK/morph/ssh"
 	"github.com/DBCDK/morph/utils"
+	"github.com/rs/zerolog/log"
 )
 
 type MorphContext struct {
@@ -39,7 +37,7 @@ type MorphContext struct {
 func HandleError(err error) {
 	//Stupid handling of catch-all errors for now
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Fatal().Err(err).Msg("Fatal error, shutting down")
 		utils.Exit(1)
 	}
 }

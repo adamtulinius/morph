@@ -9,17 +9,18 @@ import (
 )
 
 type Step struct {
-	Id            string         `json:"id"`
-	Description   string         `json:"description"`
-	ActionName    string         `json:"action"`
-	Action        actions.Action `json:"-"`
-	Parallel      bool           `json:"parallel"`
-	OnFailure     string         `json:"on-failure"` // retry, exit, ignore
-	Timeout       int            `json:"timeout"`
-	RetryInterval int            `json:"retry-interval"` // interval between retries in case of OnFailure = "retry"
-	Steps         []Step         `json:"steps"`
-	DependsOn     []string       `json:"dependencies"`
-	CanResume     bool           `json:"can-resume"`
+	Id            string            `json:"id"`
+	Description   string            `json:"description"`
+	ActionName    string            `json:"action"`
+	Action        actions.Action    `json:"-"`
+	Parallel      bool              `json:"parallel"`
+	OnFailure     string            `json:"on-failure"` // retry, exit, ignore
+	Timeout       int               `json:"timeout"`
+	RetryInterval int               `json:"retry-interval"` // interval between retries in case of OnFailure = "retry"
+	Steps         []Step            `json:"steps"`
+	DependsOn     []string          `json:"dependencies"`
+	CanResume     bool              `json:"can-resume"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 type XSchedule struct {
