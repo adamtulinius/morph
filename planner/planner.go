@@ -162,7 +162,6 @@ func ExecuteStep(ctx context.Context, megaCtx MegaContext, step Step) error {
 	return nil
 }
 
-// FIXME: Make constraints configurable runtime --maxUnavailable location=*:3
 func waitForSlot(megaContext MegaContext, step Step) Slot {
 	// Der er noget med tags og bla bla, steps har fx ikke tags eller labels lige nu, og
 	// dette skal eksplicit ikke være på host-niveau men på step-niveauz

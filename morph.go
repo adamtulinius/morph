@@ -24,6 +24,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -45,6 +46,7 @@ var (
 	selectSkip          int
 	selectLimit         int
 	orderingTags        string
+	constraintsFlag     = app.Flag("constraint", "Add constraints to manipulate order of execution").Default("").Strings()
 	deployment          string
 	timeout             int
 	askForSudoPasswd    bool
@@ -448,6 +450,56 @@ func main() {
 		stepsDone := cache.NewLockedMap[string]("steps-done")
 		stepsDb := cache.NewLockedMap[planner.Step]("steps")
 
+		constraints := deploymentMetadata.Constraints
+
+		constraintsArgs := make([]nix.Constraint, 0)
+		constraintsDefaults := make([]nix.Constraint, 0)
+
+		for _, c := range *constraintsFlag {
+			if len(c) == 0 {
+				continue
+			}
+
+			// arguments look like this: labelKey=labelValue:constraintType:constraintValue, e.g. location=dc1:maxUnavailable=2
+			parts := strings.SplitN(c, ":", 2)
+			labelHalf := parts[0]
+			constraintHalf := parts[1]
+			labelParts := strings.SplitN(labelHalf, "=", 2)
+
+			labelKey := labelParts[0]
+			labelValue := labelParts[1]
+			labelSelector := nix.LabelSelector{Label: labelKey, Value: labelValue}
+
+			constraintParts := strings.SplitN(constraintHalf, "=", 2)
+
+			constraintType := constraintParts[0]
+			constraintValue := constraintParts[1]
+
+			switch strings.ToLower(constraintType) {
+			case "maxunavailable":
+				maxUnavailable, err := strconv.Atoi(constraintValue)
+				if err != nil {
+					log.Fatal().Msg("Invalid value in constraint - not an integer: " + constraintValue)
+				}
+				constraintsArgs = append(constraintsArgs, nix.NewConstraint(labelSelector, maxUnavailable))
+
+			default:
+				log.Fatal().Msg("Unknown constraint type: " + constraintType)
+			}
+		}
+
+		constraintsDefaults = append(constraintsDefaults, nix.NewConstraint(nix.LabelSelector{Label: "_", Value: "host"}, 1))
+
+		constraints = append(constraints, constraintsArgs...)
+		constraints = append(constraints, deploymentMetadata.Constraints...)
+		constraints = append(constraints, constraintsDefaults...)
+
+		fmt.Println("constraints:")
+		log.Debug().Msg("constraints:")
+		for _, c := range constraints {
+			log.Debug().Msg(fmt.Sprintf("- %s=%s: %v\n", c.Selector.Label, c.Selector.Value, c))
+		}
+
 		megaContext := planner.MegaContext{
 			Hosts:        hostsMap, // FIXME: Either get rid of this, or set the hosts from a new EvalDeployment step. Each deployment will need its own megaContext probably.
 			MorphContext: mctx,
@@ -458,7 +510,7 @@ func main() {
 			Steps:        &stepsDb,
 			UIActive:     !*jsonOutput,
 			UI:           tui,
-			Constraints:  deploymentMetadata.Constraints,
+			Constraints:  constraints,
 		}
 
 		go planner.StepMonitor(&stepsDb, &stepsDone)
@@ -521,6 +573,10 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 		hostSpecificPlan.Parallel = false
 		hostSpecificPlan.DependsOn = []string{buildPlan.Id}
 		hostSpecificPlan.Labels = host.Labels
+		if _, hasHostLabel := hostSpecificPlan.Labels["host"]; !hasHostLabel {
+			hostSpecificPlan.Labels["host"] = host.Name // TODO: Document implicit labels
+		}
+		hostSpecificPlan.Labels["_"] = "host"
 
 		hostSpecificPlans[host.Name] = hostSpecificPlan
 	}

@@ -54,6 +54,17 @@ type Constraint struct {
 	Chans          *cache.LockedMap[chan bool] `json:"-"`
 }
 
+func NewConstraint(selector LabelSelector, maxUnavailable int) Constraint {
+	id := constraintChannelCounter.Add(1)
+	chans := cache.NewLockedMap[chan bool](fmt.Sprintf("constraint-group-%d", id))
+
+	return Constraint{
+		Selector:       selector,
+		MaxUnavailable: maxUnavailable,
+		Chans:          &chans,
+	}
+}
+
 // Set default values for a Constraint when being unmarshalled
 func (c *Constraint) UnmarshalJSON(data []byte) error {
 	id := constraintChannelCounter.Add(1)
