@@ -18,8 +18,8 @@ type LockedMap[T any] struct {
 	data       map[string]T
 }
 
-func NewLockedMap[T any](identifier string) LockedMap[T] {
-	return LockedMap[T]{
+func NewLockedMap[T any](identifier string) *LockedMap[T] {
+	return &LockedMap[T]{
 		identifier: identifier,
 		mutex:      sync.RWMutex{},
 		data:       make(map[string]T),
@@ -90,4 +90,16 @@ func (m *LockedMap[T]) GetCopy() map[string]T {
 	}
 
 	return dataCopy
+}
+
+// run provided fn on the value of a key
+func (m *LockedMap[T]) Run(key string, defaultValue T, fn func(T) T) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if _, ok := m.data[key]; !ok {
+		m.data[key] = defaultValue
+	}
+
+	m.data[key] = fn(m.data[key])
 }

@@ -41,14 +41,3 @@ func HandleError(err error) {
 		utils.Exit(1)
 	}
 }
-
-type StepUpdateEvent struct {
-	StepId string
-	State  string
-}
-
-// FIXME: Merge this with LogEvent
-type StepLogEvent struct {
-	StepId string
-	Data   string
-}

@@ -2,10 +2,14 @@ package ui
 
 import (
 	"fmt"
-	"github.com/DBCDK/morph/common"
+	"github.com/DBCDK/morph/events"
 	"github.com/DBCDK/morph/planner"
+	"github.com/DBCDK/morph/steps"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/tree"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -36,15 +40,17 @@ var (
 
 	stepStyleWaiting   = lipgloss.NewStyle()
 	stepStyleScheduled = lipgloss.NewStyle().Background(lipgloss.Color("#666666"))
-	stepStyleBlocked   = lipgloss.NewStyle().Background(lipgloss.Color("#ff6666"))
+	stepStyleBlocked   = lipgloss.NewStyle().Background(lipgloss.Color("#ffff66"))
 	stepStyleRunning   = lipgloss.NewStyle().Background(lipgloss.Color("#6666ff"))
 	stepStyleDone      = lipgloss.NewStyle().Background(lipgloss.Color("#66cc66"))
+	stepStyleFailed    = lipgloss.NewStyle().Background(lipgloss.Color("#ff6666"))
 	stepStyle          = map[string]lipgloss.Style{
-		planner.Waiting:   stepStyleWaiting,
-		planner.Scheduled: stepStyleScheduled,
-		planner.Blocked:   stepStyleBlocked,
-		planner.Running:   stepStyleRunning,
-		planner.Done:      stepStyleDone,
+		planner.Waiting: stepStyleWaiting,
+		planner.Queued:  stepStyleScheduled,
+		planner.Blocked: stepStyleBlocked,
+		planner.Running: stepStyleRunning,
+		planner.Done:    stepStyleDone,
+		planner.Failed:  stepStyleFailed,
 	}
 )
 
@@ -57,6 +63,7 @@ func tabBorderWithBottom(left, middle, right string) lipgloss.Border {
 }
 
 type model struct {
+	mega  *planner.MegaContext
 	ready bool
 
 	width  int
@@ -65,10 +72,12 @@ type model struct {
 	viewport        viewport.Model
 	viewportContent string
 	gotPlan         bool
-	plan            planner.Step
+	plan            steps.Step
 
 	stepStatus map[string]string
 	stepLog    map[string]string // FIXME: Is it better for this to be map[string][]string and store each event individually?
+	queue      []events.StepStatus
+	steps      map[string]steps.Step
 
 	Tabs       []string
 	TabContent []string
@@ -124,7 +133,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.Height = msg.Height - verticalMarginHeight
 		}
 
-	case LogEvent:
+	case events.Log:
 		// FIXME: Scroll broken, both manual and automatic
 		m.TabContent[1] += msg.Data
 		if !strings.HasSuffix(msg.Data, "\n") {
@@ -135,16 +144,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 		}
 
-	case common.StepLogEvent:
+	case events.RegisterStep:
+		m.steps[msg.Step.Id] = msg.Step
+
+	case events.StepLog:
 		m.stepLog[msg.StepId] += msg.Data
 		if !strings.HasSuffix(msg.Data, "\n") {
 			m.stepLog[msg.StepId] += "\n"
 		}
 
-	case common.StepUpdateEvent:
+	case events.StepUpdate:
 		m.stepStatus[msg.StepId] = msg.State
 
-	case planner.Step:
+	case events.QueueStatus:
+		m.queue = msg.Queue
+
+	case steps.Step:
 		m.gotPlan = true
 		m.plan = msg
 	}
@@ -192,15 +207,30 @@ func (m model) View() string {
 	switch m.activeTab {
 	case 0:
 		if m.gotPlan {
-			m.viewportContent = renderStep(m, m.plan).String()
+			m.viewportContent = renderPlan(m, m.plan).String()
 		} else {
 			m.viewportContent = "loading plan"
 		}
-		//m.viewportContent = m.TabContent[1]
 	case 1:
 		m.viewportContent = m.TabContent[1]
+
+	case 2:
+		m.viewportContent = renderStepsInState(m, planner.Running)
+
+	case 3:
+		m.viewportContent = renderQueue(m)
+
+	case 4:
+		m.viewportContent = renderStepsInState(m, planner.Done)
+
+	case 5:
+		m.viewportContent = renderStepsInState(m, planner.Failed)
+
+	case 6:
+		m.viewportContent = renderStepsInState(m, "")
+
 	default:
-		m.viewportContent = ":o"
+		m.viewportContent = "configure me mr programmer"
 	}
 
 	m.viewport.SetContent(m.viewportContent)
@@ -228,7 +258,7 @@ func (m model) footerView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Center, line, info)
 }
 
-func renderStep(m model, step planner.Step) *tree.Tree {
+func renderPlan(m model, step steps.Step) *tree.Tree {
 	allowCollapse := false
 
 	stepStatus := m.stepStatus[step.Id]
@@ -255,32 +285,148 @@ func renderStep(m model, step planner.Step) *tree.Tree {
 		} else {
 			t = tree.Root(fmt.Sprintf("%*s %s (%d/%d)", 9, stepStatus, style.Render(step.Description), childStepsDone, childSteps))
 		}
+	} else {
+		t = tree.Root(fmt.Sprintf("BUG: missing style for stepStatus = '%s'", stepStatus))
 	}
 
 	if allowCollapse && childSteps == childStepsDone {
 		// intentionally left blank
 	} else {
 		for _, subStep := range step.Steps {
-			t.Child(renderStep(m, subStep))
+			t.Child(renderPlan(m, subStep))
 		}
 	}
 
 	return t
 }
 
-func DoTea() *tea.Program {
+func renderStepById(m model, stepId string) string {
+	if step, ok := m.steps[stepId]; ok {
+		return renderStep(m, step)
+	} else {
+		return "unknown step: " + stepId
+	}
+}
+
+func renderStep(m model, step steps.Step) string {
+
+	r := strings.Builder{}
+
+	r.WriteString(fmt.Sprintf("# %s: %s\n\n", step.Action.Name(), step.Description))
+	r.WriteString("id: " + step.Id + "\n\n")
+
+	if len(step.Labels) == 0 {
+		r.WriteString("labels: none\n")
+	} else {
+		r.WriteString("labels:\n")
+		labelKeys := slices.Sorted(maps.Keys(step.Labels))
+		for _, key := range labelKeys {
+			r.WriteString("- " + key + "=" + step.Labels[key] + "\n")
+		}
+	}
+	r.WriteString("\n")
+
+	if len(step.DependsOn) == 0 {
+		r.WriteString("dependencies: none\n")
+	} else {
+		r.WriteString("dependencies:\n")
+		for _, subStep := range step.DependsOn {
+			r.WriteString("- " + subStep + "\n")
+		}
+	}
+	r.WriteString("\n")
+
+	r.WriteString("\n")
+
+	return r.String()
+}
+
+func renderQueue(m model) string {
+	r := strings.Builder{}
+
+	if len(m.queue) == 0 {
+		r.WriteString("queue empty\n")
+	}
+
+	for _, stepStatus := range m.queue {
+		r.WriteString(renderStep(m, stepStatus.Step))
+
+		r.WriteString("Blocked by:\n")
+
+		for _, blockingStep := range stepStatus.BlockedBy {
+			r.WriteString("* " + blockingStep + "\n")
+		}
+
+		r.WriteString("\n")
+	}
+
+	render, err := glamour.Render(r.String(), "dark")
+	if err != nil {
+		return err.Error()
+	}
+
+	return render
+}
+
+func renderStepsInState(m model, state string) string {
+	renderAllSteps := state == ""
+	r := strings.Builder{}
+
+	stepIds := slices.Sorted(maps.Keys(m.stepStatus))
+	matchingIds := make([]string, 0)
+
+	if renderAllSteps {
+		matchingIds = stepIds
+	} else {
+		for _, stepId := range stepIds {
+			if m.stepStatus[stepId] == state {
+				matchingIds = append(matchingIds, stepId)
+			}
+		}
+	}
+
+	if len(matchingIds) == 0 {
+		r.WriteString("nothing matching state=" + state + "\n")
+	}
+
+	for _, stepId := range matchingIds {
+		r.WriteString(renderStepById(m, stepId))
+		if renderAllSteps {
+			r.WriteString("state: " + m.stepStatus[stepId] + "\n")
+		}
+
+		r.WriteString("\n")
+	}
+
+	render, err := glamour.Render(r.String(), "dark")
+	if err != nil {
+		return err.Error()
+	}
+
+	return render
+}
+
+func DoTea(eventChan chan events.Event) *tea.Program {
 	p := tea.NewProgram(
 		model{
 			viewportContent: "",
 			gotPlan:         false,
-			Tabs:            []string{"plan", "logs"},
-			TabContent:      []string{"creating plan", ""},
+			Tabs:            []string{"plan", "logs", "running", "queue", "done", "failed", "all"},
+			TabContent:      []string{"", "", "", "", "", "", ""},
 			stepLog:         make(map[string]string),
 			stepStatus:      make(map[string]string),
+			steps:           make(map[string]steps.Step),
 		},
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
+
+	go func() {
+		for {
+			event := <-eventChan
+			p.Send(event)
+		}
+	}()
 
 	return p
 }

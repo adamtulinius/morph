@@ -1,10 +1,13 @@
 package logging
 
 import (
+	"cmp"
 	"fmt"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -53,4 +56,27 @@ func LogCommand(host string, cmd *exec.Cmd) {
 	log.Info().
 		Array("command", zLogCmd).
 		Msg(fmt.Sprintf("running command: %s", cmd.String()))
+}
+
+func ArrayToZLogArray[T any](elems []T) *zerolog.Array {
+	res := zerolog.Arr()
+
+	for _, el := range elems {
+		res.Str(fmt.Sprintf("%v", el)) // Hack hack hack
+	}
+
+	return res
+}
+
+func MapToZLogDict[T cmp.Ordered, U any](elems map[T]U) *zerolog.Event {
+	res := zerolog.Dict()
+
+	keys := slices.Sorted(maps.Keys(elems))
+
+	for _, key := range keys {
+		value := elems[key]
+		res.Str(fmt.Sprintf("%v", key), fmt.Sprintf("%v", value)) // Hack hack hack
+	}
+
+	return res
 }

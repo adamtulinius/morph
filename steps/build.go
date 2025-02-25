@@ -1,7 +1,8 @@
-package actions
+package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/DBCDK/morph/cache"
@@ -17,8 +18,22 @@ type Build struct {
 	Hosts []string `json:"hosts"`
 }
 
-func (_ Build) Name() string {
+func (build Build) Name() string {
 	return "build"
+}
+
+func (build *Build) MarshalJSONx(step Step) ([]byte, error) {
+	return json.Marshal(struct {
+		StepAlias
+		Build
+	}{
+		StepAlias: StepAlias(step),
+		Build:     *build,
+	})
+}
+
+func (build Build) UnmarshalJSON(b []byte) error {
+	return json.Unmarshal(b, &build)
 }
 
 func filterHosts(needles []string, allHosts map[string]nix.Host) ([]nix.Host, error) {
@@ -36,8 +51,8 @@ func filterHosts(needles []string, allHosts map[string]nix.Host) ([]nix.Host, er
 	return result, nil
 }
 
-func (step Build) Run(ctx context.Context, mctx *common.MorphContext, allHosts map[string]nix.Host, cache_ *cache.LockedMap[string]) error {
-	hosts, err := filterHosts(step.Hosts, allHosts)
+func (build *Build) Run(ctx context.Context, mctx *common.MorphContext, allHosts map[string]nix.Host, cache_ *cache.LockedMap[string]) error {
+	hosts, err := filterHosts(build.Hosts, allHosts)
 	if err != nil {
 		return err
 	}

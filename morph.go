@@ -3,7 +3,7 @@ package main
 // TODO: Morph NixOS integration tests
 // TODO: turn all `panic`'s into proper error handling
 // TODO: remove --passwd since morph can then ignore stdin and doesn't have to figure out how to share it between steps
-// TODO: 12:14AM ERR error marshalling plan to JSON error="json: error calling MarshalJSON for type planner.Step: json: error calling MarshalJSON for type planner.Step: json: error calling MarshalJSON for type planner.Step: unmarshall: unknown action: wait-for-online"
+// TODO: 12:14AM ERR error marshalling plan to JSON error="json: error calling MarshalJSON for type steps.Step: json: error calling MarshalJSON for type steps.Step: json: error calling MarshalJSON for type steps.Step: unmarshall: unknown action: wait-for-online"
 //     ^ drop wait-for-online and let it be a repeating gate/step kinda thing that calls IsOnline
 import (
 	"bufio"
@@ -12,13 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/DBCDK/kingpin"
-	"github.com/DBCDK/morph/actions"
-	"github.com/DBCDK/morph/cache"
 	"github.com/DBCDK/morph/common"
 	"github.com/DBCDK/morph/cruft"
+	"github.com/DBCDK/morph/events"
 	"github.com/DBCDK/morph/nix"
 	"github.com/DBCDK/morph/planner"
 	"github.com/DBCDK/morph/ssh"
+	"github.com/DBCDK/morph/steps"
 	"github.com/DBCDK/morph/ui"
 	"github.com/DBCDK/morph/utils"
 	"github.com/rs/zerolog"
@@ -26,7 +26,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // These are set at build time via -ldflags magic
@@ -313,13 +312,21 @@ func main() {
 	// Detect when a process wants STDIN-input and find a way to handle that - mostly relevant for SSH TOFU prompts
 	// Tyvstjæl hvordan K8s deployments virker med min og max men brug det på tags. Når dette aktiveres skal morph først health checke alt så morph ved hvor meget der er oppe og nede
 	// Replace tags with labels
+	// Canary mode: Ramp up concurrency along with successful updates
+	// Some steps should be implicit, like running nix-build on demand
+	// Poweroff and poweron actions, maybe something like maintenancemode, or... even custom defined host states
+	// SSH output needs to be log'ed instead
+
+	// Constraints must be serialized into the plan (and maybe that makes us actually need a Plan type that wraps the first Step because of that). Otherwise constraints are lost when dumping and loading a plan.
 
 	// Metrics that can be reacted on
 
 	clause := kingpin.MustParse(app.Parse(os.Args[1:]))
 
+	eventManager := events.NewManager()
+
 	// Don't actually run the UI unless activated
-	tui := ui.DoTea()
+	tui := ui.DoTea(eventManager.Subscribe())
 
 	if !*jsonOutput {
 		go func() {
@@ -329,28 +336,15 @@ func main() {
 			}
 		}()
 
-		tui.Send(ui.LogEvent{Data: "ping"})
-		go func() {
-			time.Sleep(time.Second)
-			tui.Send(ui.LogEvent{Data: "ping"})
-		}()
-
-		time.Sleep(time.Second)
-
 		log.Logger = log.Output(zerolog.ConsoleWriter{
-			Out: ui.LogWriter{Program: tui},
-			//NoColor: true,
+			Out: eventManager.NewLogWriter(),
 		})
 
-		//load the UI here and redirect logs to a bubbletea pane instead
 	} else {
 		//log.Logger = log.Output(zerolog.New(os.Stdout).With().Timestamp().Logger())
 		log.Logger = log.Output(os.Stdout)
-	}
 
-	//TODO: Remove deprecation warning when removing --build-arg flag
-	if len(nixBuildArg) > 0 {
-		log.Warn().Msg("Deprecation: The --build-arg flag will be removed in a future release.")
+		// FIXME: Output events to stdout, output log.bla to stderr
 	}
 
 	defer utils.RunFinalizers()
@@ -415,7 +409,7 @@ func main() {
 
 		plan := createPlan(hosts, clause)
 		if !*jsonOutput {
-			tui.Send(plan)
+			eventManager.SendEvent(plan)
 		}
 
 		planJson, err := json.Marshal(plan)
@@ -445,10 +439,6 @@ func main() {
 			// Don't execute the plan
 			return
 		}
-
-		cache_ := cache.NewLockedMap[string]("cache")
-		stepsDone := cache.NewLockedMap[string]("steps-done")
-		stepsDb := cache.NewLockedMap[planner.Step]("steps")
 
 		constraints := deploymentMetadata.Constraints
 
@@ -499,22 +489,17 @@ func main() {
 			log.Debug().Msg(fmt.Sprintf("- %s=%s: %v\n", c.Selector.Label, c.Selector.Value, c))
 		}
 
-		megaContext := planner.MegaContext{
-			Hosts:        hostsMap, // FIXME: Either get rid of this, or set the hosts from a new EvalDeployment step. Each deployment will need its own megaContext probably.
-			MorphContext: mctx,
-			SSHContext:   ssh.CreateSSHContext(askForSudoPasswd, passCmd),
-			NixContext:   nix.GetNixContext(assetRoot, showTrace, *keepGCRoot, *allowBuildShell),
-			Cache:        &cache_,
-			StepsDone:    &stepsDone,
-			Steps:        &stepsDb,
-			UIActive:     !*jsonOutput,
-			UI:           tui,
-			Constraints:  constraints,
+		if false {
+			os.Exit(17)
 		}
 
-		go planner.StepMonitor(&stepsDb, &stepsDone)
+		megaContext := planner.NewMegaContext(eventManager, hostsMap, mctx, constraints)
 
-		err = planner.ExecuteStep(context.TODO(), megaContext, plan)
+		go planner.StepMonitor(megaContext.Steps, megaContext.StepStatus)
+
+		megaContext.QueueStep(plan)
+
+		err = megaContext.Run(context.TODO())
 		if err != nil {
 			log.Error().Err(err).Msg("Error while running step") // FIXME: Log the offending step/action somehow
 			// FIXME: Dump the plan with status on what was done, and what wasn't, so it can be resumed
@@ -522,7 +507,6 @@ func main() {
 				// don't os.Exit if running with UI
 				os.Exit(1)
 			}
-
 		}
 
 		if !*jsonOutput {
@@ -555,7 +539,8 @@ func main() {
 	// common.HandleError(err)
 }
 
-func createPlan(hosts []nix.Host, clause string) planner.Step {
+// TODO: Different planners should have default constraints exposed, to be displayed in the UI for suggestions to override
+func createPlan(hosts []nix.Host, clause string) steps.Step {
 	plan := planner.EmptyStep()
 	plan.Id = "root"
 	plan.Description = "Root of execution plan"
@@ -563,12 +548,13 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 
 	buildPlan := planner.CreateBuildPlan(hosts)
 
-	hostSpecificPlans := make(map[string]planner.Step, 0)
+	hostSpecificPlans := make(map[string]steps.Step, 0)
 
 	for _, host := range hosts {
 		hostSpecificPlan := planner.EmptyStep()
+		hostSpecificPlan.Id = "host:" + host.Name
 		hostSpecificPlan.Description = "host: " + host.Name
-		hostSpecificPlan.Action = actions.None{}
+		hostSpecificPlan.Action = &steps.None{}
 		hostSpecificPlan.Parallel = false
 		hostSpecificPlan.DependsOn = []string{buildPlan.Id}
 		hostSpecificPlan.Labels = host.Labels
@@ -597,7 +583,6 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 
 		for _, host := range hosts {
 			push := planner.CreateStepPush(host)
-			push.DependsOn = append(push.DependsOn, buildPlan.Id)
 
 			hostSpecificPlans[host.Name] = planner.AddStepsSeq(
 				hostSpecificPlans[host.Name],
@@ -610,7 +595,6 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 
 		for _, host := range hosts {
 			push := planner.CreateStepPush(host)
-			push.DependsOn = append(push.DependsOn, buildPlan.Id)
 
 			deployDryActivate := planner.CreateStepDeployDryActivate(host)
 			deploySwitch := planner.CreateStepDeploySwitch(host)
@@ -622,6 +606,7 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 			stepWaitForOnline := planner.CreateStepWaitForOnline(host)
 
 			preDeployChecks := planner.CreateStepChecks(
+				"pre-deploy-checks",
 				host,
 				make([]planner.CommandPlus, 0),
 				planner.HealthChecksToCommands(host.PreDeployChecks.Cmd),
@@ -630,6 +615,7 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 			)
 
 			healthChecks := planner.CreateStepChecks(
+				"healthchecks",
 				host,
 				make([]planner.CommandPlus, 0),
 				planner.HealthChecksToCommands(host.HealthChecks.Cmd),
@@ -685,7 +671,6 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 				hostSpecificPlans[host.Name] = planner.AddStepsSeq(
 					hostSpecificPlans[host.Name],
 					push,
-					preDeployChecks,
 					deployBoot,
 				)
 			}
@@ -707,9 +692,9 @@ func createPlan(hosts []nix.Host, clause string) planner.Step {
 
 		for _, host := range hosts {
 			push := planner.CreateStepPush(host)
-			push.DependsOn = append(push.DependsOn, buildPlan.Id)
 
 			healthChecks := planner.CreateStepChecks(
+				"healthchecks",
 				host,
 				make([]planner.CommandPlus, 0),
 				planner.HealthChecksToCommands(host.HealthChecks.Cmd),
